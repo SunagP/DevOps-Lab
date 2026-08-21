@@ -1,0 +1,334 @@
+# Exercise: Scaling Flask App on Single Node using Replicasets
+
+## Real-Life Tech Use Case: E-commerce Flash Sale
+During a flash sale on an e-commerce site (like Flipkart’s Big Billion Days or Amazon Prime Day):
+A simple Flask service might normally handle 100 requests per minute.
+Suddenly, traffic spikes to 10,000 requests per minute.
+If the app runs on a single Pod, it will crash under the load.
+Using ReplicaSets, the system can scale out to 10 or 20 Pods running the same app, distributing requests among them.
+Once the sale ends and traffic returns to normal, Kubernetes can scale back down to save resources.
+
+## Objective:
+- Understand ReplicaSets and Pods
+- Scale Flask App deployment
+- Observe pod distribution
+
+## Key Observations and Learnings
+- Pod Distribution → Each Pod is like an identical worker. Scaling means creating clones of the app.
+- Resiliency → If one Pod fails, the ReplicaSet automatically creates another, so users don’t notice downtime.
+- Efficiency → Instead of over-provisioning servers, we add Pods when demand spikes and remove them when demand is low.
+- Scalability in the Real World → Exactly how Netflix, YouTube, or Swiggy scale their microservices to handle peak traffic hours.
+
+## Create an App to take Buy orders for a !!Flash Sale!!
+
+```
+# app.py
+from flask import Flask, request
+import socket, time, random
+
+app = Flask(__name__)
+
+@app.get("/")
+def homepage():
+    return {
+        "message": "Welcome to Big Sale!",
+        "pod": socket.gethostname(),
+        "ts": time.time()
+    }
+
+@app.get("/buy")
+def buy():
+    # simulate a flash sale checkout
+    item = random.choice(["Smartphone", "Shoes", "Headphones", "Laptop"])
+    user = request.args.get("user", f"user{random.randint(1,1000)}")
+    return {
+        "status": "success",
+        "item": item,
+        "user": user,
+        "served_by_pod": socket.gethostname(),
+        "time": time.strftime("%H:%M:%S")
+    }
+
+@app.get("/health")
+def health():
+    return {"status": "healthy", "pod": socket.gethostname()}
+```
+
+# App details
+- / → Welcomes users to the Big Sale.
+- /buy → Simulates a checkout during a flash sale.
+- Assigns a random product or uses ?user=123 query param.
+- Shows which Pod served the request → students can see load distribution across Pods.
+- /health → For readiness/liveness probes.
+
+# Build and push docker image
+## Create Docker file
+```
+FROM python:3.11-slim
+WORKDIR /app
+COPY ex3-flash-sale.py .
+RUN pip install --no-cache-dir flask gunicorn
+CMD ["gunicorn","-b","0.0.0.0:5000","app:app","--workers","1","--threads","2"]
+```
+
+## Build Docker image and push to your docker repository
+```
+docker build -t <your-dockerhub-username>/flashsale:1.0 .
+docker push <your-dockerhub-username>/flashsale:1.0
+```
+
+## Step 1: Clean up previous minikube does
+
+If you already have a running cluster, you'll need to stop and delete it before starting a new one
+
+```
+minikube stop
+minikube delete
+```
+## Step 2: Start minikube with a single node
+
+```
+minikube start --nodes=1
+```
+
+**Output**
+
+```
+😄  minikube v1.34.0 on Ubuntu 24.04 (amd64)
+    ▪ MINIKUBE_ACTIVE_DOCKERD=minikube
+✨  Automatically selected the docker driver
+📌  Using Docker driver with root privileges
+👍  Starting "minikube" primary control-plane node in "minikube" cluster
+🚜  Pulling base image v0.0.45 ...
+🔥  Creating docker container (CPUs=2, Memory=2400MB) ...
+🐳  Preparing Kubernetes v1.31.0 on Docker 27.2.0 ...
+    ▪ Generating certificates and keys ...
+    ▪ Booting up control plane ...
+    ▪ Configuring RBAC rules ...
+🔗  Configuring bridge CNI (Container Networking Interface) ...
+🔎  Verifying Kubernetes components...
+    ▪ Using image gcr.io/k8s-minikube/storage-provisioner:v5
+🌟  Enabled addons: storage-provisioner, default-storageclass
+🏄  Done! kubectl is now configured to use "minikube" cluster and "default" namespace by default
+```
+
+Check nodes
+```
+kubectl get nodes
+NAME       STATUS   ROLES           AGE   VERSION
+minikube   Ready    control-plane   42s   v1.31.0
+```
+
+
+
+
+## Step 3: Create a new file replicaset.yaml with the following content:
+
+File Name: flashsale-replicaset.yaml 
+```
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: flashsale-rs
+  labels:
+    app: flashsale
+spec:
+  replicas: 3  ## Number of replicas (copies of flashsale app) to run
+  selector:
+    matchLabels:
+      app: flashsale
+  template:
+    metadata:
+      labels:
+        app: flashsale
+    spec:
+      containers:
+      - name: flashsale-container
+        image: flashsale:1.0
+        ports:
+        - containerPort: 5000
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 5000
+          initialDelaySeconds: 2
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 5000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "500m"
+            memory: "256Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flashsale-svc
+spec:
+  selector:
+    app: flashsale
+  ports:
+  - name: http
+    port: 80
+    targetPort: 5000
+  type: ClusterIP
+```
+
+## Step 4: Apply the ReplicaSet configuration:
+
+```
+kubectl apply -f flashsale-replicaset.yaml
+```
+
+Output
+```
+replicaset.apps/flashsale-rs created
+service/flashsale-svc created
+```
+
+## Step 5: Initialize minikube, build Imange and Verify the ReplicaSet:
+
+```
+minikube docker-env
+eval $(minikube docker-env)
+docker build -t flask-app .
+```
+
+## Step 6: Verify the pods:
+
+```
+kubectl get pods
+
+NAME                 READY   STATUS    RESTARTS   AGE
+flashsale-rs-8gbfp   1/1     Running   0          3m35s
+flashsale-rs-f4gsl   1/1     Running   0          3m35s
+flashsale-rs-nb5kl   1/1     Running   0          3m35s
+
+kubectl get rs
+
+NAME           DESIRED   CURRENT   READY   AGE
+flask-app-rs   3         3         0       40s
+```
+
+## Step 7: Scale the ReplicaSet to 5 replicas:
+
+```
+kubectl scale rs flask-app-rs --replicas=5
+
+replicaset.apps/flask-app-rs scaled
+```
+
+## Step 8: Verify the updated ReplicaSet:
+
+```
+kubectl get rs
+
+NAME           DESIRED   CURRENT   READY   AGE
+flask-app-rs   5         5         5       7m38s
+```
+
+## Step 9: Verify the updated pods:
+
+```
+kubectl get pods
+
+NAME                 READY   STATUS    RESTARTS   AGE
+flask-app-rs-4nr6q   1/1     Running   0          7m55s
+flask-app-rs-84v7x   1/1     Running   0          7m55s
+flask-app-rs-nsmlx   1/1     Running   0          32s
+flask-app-rs-rbwr4   1/1     Running   0          7m55s
+flask-app-rs-wfbb4   1/1     Running   0          32s
+```
+
+## Step 10: Delete one pod:
+Command to delete a pod: kubectl delete pod <pod-name>
+
+```
+kubectl delete pod flask-app-rs-84v7x
+pod "flask-app-rs-84v7x" deleted
+```
+
+## Step 11: Verify the pods:
+
+```
+kubectl get pods
+
+NAME                 READY   STATUS    RESTARTS   AGE
+flask-app-rs-4nr6q   1/1     Running   0          9m19s
+flask-app-rs-hqtm7   1/1     Running   0          51s
+flask-app-rs-nsmlx   1/1     Running   0          116s
+flask-app-rs-rbwr4   1/1     Running   0          9m19s
+flask-app-rs-wfbb4   1/1     Running   0          116s
+```
+
+View pod distribution across nodes
+```
+kubectl get pods -o wide
+NAME                 READY   STATUS    RESTARTS   AGE     IP            NODE       NOMINATED NODE   READINESS GATES
+flask-app-rs-4nr6q   1/1     Running   0          10m     10.244.0.9    minikube   <none>           <none>
+flask-app-rs-hqtm7   1/1     Running   0          109s    10.244.0.12   minikube   <none>           <none>
+flask-app-rs-nsmlx   1/1     Running   0          2m54s   10.244.0.11   minikube   <none>           <none>
+flask-app-rs-rbwr4   1/1     Running   0          10m     10.244.0.7    minikube   <none>           <none>
+flask-app-rs-wfbb4   1/1     Running   0          2m54s   10.244.0.10   minikube   <none>           <none>
+```
+
+# Q&A based on the exercise
+
+
+**Q1. What is the initial number of replicas in the ReplicaSet?**
+
+Answer: 3
+
+**Q2. How many pods are running after applying the ReplicaSet configuration?**
+
+Answer: 3
+
+**3. What happens when you scale the ReplicaSet to 5 replicas?**
+
+Answer: Kubernetes creates 2 additional pods to meet the desired number of replicas (5). The ReplicaSet now has 5 running pods.
+
+**4. What happens when you delete one pod?**
+
+Answer: Kubernetes automatically creates a new pod to replace the deleted one, maintaining the desired number of replicas (5).
+
+**5. How does Kubernetes maintain the desired number of replicas?**
+
+Answer: Kubernetes continuously monitors the number of running pods and compares it to the desired number of replicas. If there's a discrepancy, Kubernetes creates or deletes pods to maintain the desired state.
+
+**6. How many nodes are running?**
+
+Answer: 1
+
+**7. Where are the pods running with respect to nodes?**
+
+Answer:
+
+Node 1:
+
+- Pod 1 (flask-app-<id>)
+- Pod 2 (flask-app-<id>)
+- Pod 3 (flask-app-<id>)
+- Pod 4 (flask-app-<id>)
+- Pod 5 (flask-app-<id>)
+
+All 5 pods are running on the single node.
+
+
+## Additional Challenges:
+
+- Update the replicaset.yaml file to use a different image.
+- Create a Deployment instead of a ReplicaSet.
+- Use kubectl describe to inspect the ReplicaSet and pods.
+
+## Tips and Variations:
+
+- Use kubectl get pods -o wide to see pod distribution across nodes.
+- Use kubectl logs to view pod logs.
+- Use kubectl exec to access a pod's container.
