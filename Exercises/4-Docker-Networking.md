@@ -211,3 +211,7 @@ my-bridge-net
 - Bridge Network: Containers are in a private room, talking to each other through a door.
 - Host Network: Containers are in the same room as the host, talking directly to everyone.
 4. Use the -p flag to expose a container's port (e.g., `-p 500")
+
+
+### Detailed steps for the lab exercise can be found at
+https://docs.google.com/document/d/1ue5G-sj02E4G9NW5T5ObmsbdMl4LihUS/edit?usp=sharing&ouid=116025589128606060426&rtpof=true&sd=true
